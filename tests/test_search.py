@@ -151,5 +151,9 @@ def test_search_does_not_join_song_tags(app, seed_songs):
         finally:
             event.remove(engine, "before_cursor_execute", capture)
 
-    main_song_query = next(s for s in statements if s.strip().startswith("SELECT song."))
+    main_song_query = next(
+        (s for s in statements if s.strip().startswith(("SELECT song.", "SELECT DISTINCT song."))),
+        None,
+    )
+    assert main_song_query is not None, f"No main Song SELECT found in captured statements: {statements}"
     assert "song_tags" not in main_song_query
