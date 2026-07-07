@@ -108,7 +108,17 @@ _(Milestone 2 — reproduced all five before writing any fix code. Full root cau
 
 ## Bug Fixes
 
-_(root cause analysis entries to follow — one per fixed issue)_
+### Issue #1 — Listening streak resets on Sundays (`services/streak_service.py`)
+
+**Reproduction steps:** Directly called `update_listening_streak(user, now)` with a controlled `now` rather than waiting for the real clock to land on a Sunday. Set a user's `listening_streak = 5` and `last_listened_at` to Saturday 2026-07-04 12:00 UTC, then called the function with `now` = Sunday 2026-07-05 12:00 UTC — a normal, legitimate consecutive-day listen. Streak dropped to `1` instead of incrementing to `6`.
+
+**Navigation strategy:** Started from the streak rules documented in the function's own docstring (`streak_service.py:46-50`): same day → no change, one day later → increment, more than one day → reset. Read the `if/elif/else` at lines 70-76 against those three stated rules and noticed the `elif` branch had a condition the docstring never mentioned — `and today.weekday() != 6`. That extra clause doesn't correspond to any of the three documented rules, which made it the obvious next thing to isolate. Confirmed with the controlled repro above that this exact clause was the trigger, rather than guessing from the code alone.
+
+**Root cause explanation:** Line 73 reads `elif days_since_last == 1 and today.weekday() != 6:`. Python's `date.weekday()` returns `6` for Sunday, so whenever a user's consecutive-day listen happens to fall on a Sunday, `today.weekday() != 6` evaluates to `False`, the `elif` as a whole is `False`, and execution falls through to the `else` branch — which is supposed to be reserved for multi-day gaps — resetting the streak to `1` even though only one day actually passed. The correct behavior only depends on `days_since_last`; day-of-week is irrelevant to whether two listens are on consecutive calendar days, so the `and today.weekday() != 6` clause has no valid basis in the streak rules at all.
+
+**Fix description:** Removed the `and today.weekday() != 6` clause, leaving `elif days_since_last == 1:` so the increment branch fires for any consecutive-day listen regardless of which weekday it lands on, matching the documented rule exactly.
+
+**Side-effect check:** Re-ran the same controlled test for the other two branches to confirm they were untouched: (1) `days_since_last == 0` (same-day listen) still leaves the streak unchanged, and (2) a multi-day gap still resets the streak to `1`. Also re-ran the fixed increment path on a normal (non-Sunday) consecutive day to confirm the increment still works outside the buggy condition. All three behaved identically to before the fix — only the erroneous Sunday exception was removed, no other branch's logic changed.
 
 ## AI Usage
 
