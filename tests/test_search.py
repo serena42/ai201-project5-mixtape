@@ -117,3 +117,39 @@ def test_search_returns_empty_for_no_match(app, seed_songs):
     with app.app_context():
         results = search_songs("zzz_no_match_zzz")
         assert results == []
+
+
+def test_search_does_not_join_song_tags(app, seed_songs):
+    """
+    search_songs() should not join against song_tags at the SQL level.
+
+    The filter only ever matches on title/artist, so a join to song_tags
+    contributes nothing to the WHERE clause and only fans out one row per
+    tag. This regression test inspects the actual executed SQL (not just
+    the final deduplicated Python list) because SQLAlchemy's legacy
+    Query.all() silently deduplicates full-entity results by primary key,
+    which would mask a reintroduced join in a results-only assertion.
+
+    Note: Song.tags uses lazy="subquery" loading, so a *separate* query
+    legitimately joins song_tags to populate the tags list. That query
+    selects from tag/anon_1, not directly from song, so it's excluded
+    below — only the main Song-searching query is checked.
+    """
+    from sqlalchemy import event
+    from app import db as _db
+
+    statements = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = _db.engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with app.app_context():
+            search_songs("Crown Heights")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    main_song_query = next(s for s in statements if s.strip().startswith("SELECT song."))
+    assert "song_tags" not in main_song_query
