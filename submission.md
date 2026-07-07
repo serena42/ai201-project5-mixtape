@@ -120,6 +120,8 @@ _(Milestone 2 — reproduced all five before writing any fix code. Full root cau
 
 **Side-effect check:** Re-ran the same controlled test for the other two branches to confirm they were untouched: (1) `days_since_last == 0` (same-day listen) still leaves the streak unchanged, and (2) a multi-day gap still resets the streak to `1`. Also re-ran the fixed increment path on a normal (non-Sunday) consecutive day to confirm the increment still works outside the buggy condition. All three behaved identically to before the fix — only the erroneous Sunday exception was removed, no other branch's logic changed.
 
+**Regression test:** `tests/test_streaks.py::test_streak_increments_on_sunday` (lines 83-96) already existed in the repo and covers exactly this bug — it listens on a Saturday then a Sunday and asserts the streak increments to `2`. I confirmed by temporarily reverting `streak_service.py` to the pre-fix version that this test fails against the buggy code (`assert 1 == 2`, since the Sunday listen incorrectly reset the streak instead of incrementing it), and passes against the fix. No new test was needed — this one was already in place and just needed the underlying bug fixed to go green.
+
 ## AI Usage
 
 _(to follow)_
