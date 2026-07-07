@@ -164,6 +164,20 @@ _(Milestone 2 — reproduced all five before writing any fix code. Full root cau
 
 **Regression test:** No existing test file covered notifications, so I added `tests/test_notifications.py` with three tests: `test_rating_a_song_notifies_the_sharer`, `test_rating_your_own_song_does_not_notify_yourself`, and `test_re_rating_a_song_still_notifies_the_sharer`. The first is the direct regression test — I confirmed it fails against the pre-fix code (`assert 0 == 1`, since no notification was created) and passes against the fix.
 
+### Issue #5 — Last playlist song missing (`services/playlist_service.py`)
+
+**Reproduction steps:** Queried the DB directly for a playlist's `playlist_entries` rows and confirmed 7 songs at positions 1 through 7. Then called `get_playlist_songs()` for that playlist — only 6 songs were returned; the song at position 7 was missing.
+
+**Navigation strategy:** Started from `get_playlist_songs()`'s own docstring, which explicitly states under "Note:" (line 51) that "this function returns all songs in the playlist." Read the function body top to bottom looking for anywhere that could contradict that guarantee, and found the return statement at line 66: `[song.to_dict() for song in songs[:-1]]`. The `[:-1]` slice stood out immediately because nothing earlier in the function (the join, filter, or order_by at lines 58-63) gives any indication that the last item should be special-cased or dropped — it directly contradicts the docstring one wrote right above it, which is what confirmed this was the root cause rather than intentional behavior.
+
+**Root cause explanation:** `songs[:-1]` unconditionally drops the last element of the position-ordered list before serializing it, regardless of playlist length. Since `songs` is already correctly ordered by `position` ascending (line 62), the "last element" is always the song with the highest position — i.e., the most recently added song in a normal append-only playlist. The function needs to return every song the query already correctly fetched; slicing off the last item has no basis in the stated contract ("returns all songs") or in any surrounding logic — it's a pure off-by-one on the return value.
+
+**Fix description:** Changed `[song.to_dict() for song in songs[:-1]]` to `[song.to_dict() for song in songs]`, returning every song the ordered query fetched instead of dropping the last one.
+
+**Side-effect check:** Ran the full existing `tests/test_playlists.py` suite, which includes `test_empty_playlist_returns_empty_list` — confirmed an empty playlist still correctly returns `[]` (not a hidden negative-index error) since the fix removes the slice entirely rather than changing its bounds. Also reran `test_playlist_returns_songs_in_order` to confirm the `position`-based ordering logic (lines 58-63), which the fix didn't touch, still returns songs in the correct sequence — only the truncation at the return statement was removed.
+
+**Regression test:** No new test was needed — `tests/test_playlists.py::test_playlist_returns_all_songs` (asserts `len(songs) == 5` with an inline comment "Bug causes this to return 4") and `test_playlist_returns_songs_in_order` (asserts the full 5-title list) already existed and cover this exact bug. I confirmed both fail against the pre-fix code (`test_playlist_returns_songs_in_order` fails with `Track 5` missing from the actual list) and pass against the fix.
+
 ## AI Usage
 
 _(to follow)_
