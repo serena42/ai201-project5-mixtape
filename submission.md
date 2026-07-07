@@ -50,6 +50,62 @@
 
 ---
 
+## Bug Reproduction Notes
+
+_(Milestone 2 — reproduced all five before writing any fix code. Full root cause analysis entries with fix descriptions and side-effect checks to follow per issue.)_
+
+### Issue #1 — Listening streak resets (streak_service.py)
+
+**How reproduced:** Directly called `update_listening_streak(user, now)` (`services/streak_service.py:42`) with a controlled `now`, rather than depending on the real system clock landing on a Sunday. Set a seeded user's `listening_streak = 5` and `last_listened_at` = Saturday 2026-07-04 12:00 UTC, then called the function with `now` = Sunday 2026-07-05 12:00 UTC (one calendar day later — a normal consecutive-day listen).
+
+**Result:** Streak dropped to `1` instead of incrementing to `6`.
+
+**Suspected mechanism:** `services/streak_service.py:73` — `elif days_since_last == 1 and today.weekday() != 6:` — Python's `date.weekday()` returns `6` for Sunday, so the increment branch is explicitly skipped whenever the listen happens on a Sunday, even though `days_since_last == 1` (a legitimate consecutive day). Falls through to the `else` branch, which resets to `1`.
+
+**Side effect of the repro itself:** the test script committed the Saturday setup state to the real seeded DB before I rolled back the final step. Re-ran `python seed_data.py` afterward to restore clean fixture state (this also means all previously-noted UUIDs from earlier exploration are now stale).
+
+### Issue #2 — Friends Listening Now shows stale entries (feed_service.py)
+
+**How reproduced:** `GET /feed/<darius_id>/listening-now`. Darius is friends with nova, simone, kenji. Nova has no "recent" (< 30 min) listening event in the seed data — her only event is from the "older events" seed block, ~2 hours before request time.
+
+**Result:** Nova still appeared in the response with `"listened_at": "2026-07-07T17:09:15"` while the request happened around `19:15` — roughly 2 hours stale, clearly not "listening now."
+
+**Suspected mechanism:** `services/feed_service.py:13` — `RECENT_THRESHOLD = timedelta(hours=24)`. Anything within a full rolling day counts as "now." The seed data's own comments (`seed_data.py:111`, "Recent events (within the past 30 minutes) — should appear in listening now") imply the intended window is far shorter than 24 hours.
+
+**Note:** darius/simone/kenji all also have genuinely-recent events that mask the bug via the dedup-to-most-recent-event-per-friend logic (`feed_service.py:48-60`) — had to specifically pick a friend (nova) whose only event was in the "older" bucket to see the stale entry surface.
+
+### Issue #3 — Duplicate songs in search (search_service.py) — inconclusive, defensive fix planned
+
+**Docs say:** `instructions.txt:43` calls the bug "conditional" and mentions a "second code path." `seed_data.py:73-80`'s comment claims songs with 3+ tags "expose Issue #3." `tests/test_search.py:104`'s inline comment says "Should be 1, bug causes it to be 3" for a 3-tag song — but that test currently passes against the unmodified code.
+
+**What I tried:**
+1. Called `search_songs("Crown Heights")` against the 3-tag seed song "Crown Heights Anthem" directly — got 1 result, not 3.
+2. Ran the query with `SQLALCHEMY_ECHO=True` — confirmed the `LEFT OUTER JOIN song_tags` in `search_service.py:27` really does fan out to multiple raw SQL rows (one per tag), and that a *second* query is issued separately for `Song.tags` eager loading (`models.py:90`, `lazy="subquery"`) — but that second query only loads tag data for songs that already survived dedup, so it can't produce duplicate entries.
+3. Ran broad queries matching 11-13 songs at once and checked for any duplicate IDs in the result set — none, at any scale.
+4. Manually inserted a second, genuinely distinct `Song` row with the same title/artist as an existing song, and confirmed *that* does produce two visually-duplicate entries in search results — but there is no route in this app (`routes/songs.py` has no `POST /songs`) that would let a real user action create that state. Deleted the test row immediately after to avoid polluting seed data.
+
+**Conclusion:** `db.session.query(Song)...all()` (SQLAlchemy's legacy `Query` API) automatically de-duplicates full-entity results by primary key, which silently absorbs the row fan-out from the join before it reaches the return value. Confirmed the installed SQLAlchemy version (2.0.51) satisfies `requirements.txt`'s `sqlalchemy>=2.0.0`, so this isn't an environment mismatch — the join-fan-out bug as literally described does not appear to be reproducible through `search_songs()` in this codebase as currently written.
+
+**Decision:** the join is still objectively unnecessary/wrong — nothing in the `SELECT` uses tag columns from it, it exists purely to let the `WHERE` clause reach `song_tags`, and it fans out rows for no benefit. Planned fix: add `.distinct()` (or drop the unneeded join) as a defensive correctness fix regardless of whether today's SQLAlchemy version happens to mask the symptom. Will document this reasoning in the fix's root cause analysis entry rather than claim a clean reproduction.
+
+### Issue #4 — Missing notification on song rating (notification_service.py)
+
+**How reproduced:** Checked nova's notifications (`GET /users/<nova_id>/notifications`) — 1 existing notification (the seeded `song_added_to_playlist` one). Had darius (a friend, not the sharer) rate nova's song "Midnight Drive" via `POST /songs/<song_id>/rate` with `{"user_id": darius_id, "score": 5}`. Re-checked nova's notifications.
+
+**Result:** Rating succeeded (`Rating` row created, 201 response), but notification count stayed at 1 — no new notification was created for the rating.
+
+**Suspected mechanism:** `services/notification_service.py::rate_song()` (lines 73-110) never calls `create_notification()`, unlike `add_to_playlist()` (lines 35-70), which explicitly does at line 66-70. The working playlist-add path is the template; the rating path was never wired up to it.
+
+### Issue #5 — Last playlist song missing (playlist_service.py)
+
+**How reproduced:** Queried the DB directly for the "Late Night Vibes" playlist's `playlist_entries` rows — confirmed 7 songs at positions 1 through 7. Then called `GET /playlists/<playlist_id>/songs`.
+
+**Result:** Only 6 songs returned; the song at position 7 was missing.
+
+**Suspected mechanism:** `services/playlist_service.py:66` — `return [song.to_dict() for song in songs[:-1]]`. The `[:-1]` slice unconditionally drops the last element of the ordered-by-position list, regardless of playlist length.
+
+---
+
 ## Bug Fixes
 
 _(root cause analysis entries to follow — one per fixed issue)_
