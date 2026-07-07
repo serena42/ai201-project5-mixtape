@@ -143,13 +143,13 @@ def test_search_does_not_join_song_tags(app, seed_songs):
     def capture(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
 
-    engine = _db.engine
-    event.listen(engine, "before_cursor_execute", capture)
-    try:
-        with app.app_context():
+    with app.app_context():
+        engine = _db.engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
             search_songs("Crown Heights")
-    finally:
-        event.remove(engine, "before_cursor_execute", capture)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
 
     main_song_query = next(s for s in statements if s.strip().startswith("SELECT song."))
     assert "song_tags" not in main_song_query
